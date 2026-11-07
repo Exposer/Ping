@@ -1,5 +1,5 @@
 #!/bin/bash
-# 用 SwiftPM 编译并打包成 build/Ping.app
+# 用 swiftc 编译并打包成 build/Ping.app
 # 用法：./build_app.sh [build | run]
 
 set -euo pipefail
