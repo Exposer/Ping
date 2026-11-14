@@ -45,9 +45,12 @@ enum PingError: LocalizedError {
 
 /// Sends ICMP Echo Requests over an unprivileged SOCK_DGRAM socket (IPv4 only).
 /// `ping` blocks, so call it off the main thread, one call at a time.
+/// Cancelling the task it runs in makes it throw `CancellationError` promptly.
 final class ICMPPinger: @unchecked Sendable {
     /// Largest payload an IPv4 datagram can carry after the 20-byte IP and 8-byte ICMP headers.
     static let maxPayloadSize = 65_507
+    /// Longest single wait for a reply, in milliseconds, before checking for cancellation again.
+    private static let cancellationCheckInterval: Int32 = 100
 
     let host: String
     let ipAddress: String
@@ -98,11 +101,15 @@ final class ICMPPinger: @unchecked Sendable {
         var buffer = [UInt8](repeating: 0, count: packet.count + 60)
 
         while true {
+            // Cancellation can't interrupt poll, so wait in short slices and check in between.
+            if Task.isCancelled { throw CancellationError() }
+
             let now = DispatchTime.now().uptimeNanoseconds
             guard now < deadline else { throw PingError.timeout }
 
             var pfd = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
-            let ready = poll(&pfd, 1, Int32((deadline - now) / 1_000_000) + 1)
+            let remaining = Int32((deadline - now) / 1_000_000) + 1
+            let ready = poll(&pfd, 1, min(remaining, Self.cancellationCheckInterval))
             if ready < 0 {
                 if errno == EINTR { continue }
                 throw PingError.receiveFailed(errno)

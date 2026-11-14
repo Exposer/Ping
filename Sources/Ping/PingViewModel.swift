@@ -133,11 +133,21 @@ final class PingViewModel: ObservableObject {
             if Task.isCancelled { break }
 
             let sequence = UInt16(truncatingIfNeeded: seq)
-            let result = await Task.detached {
+            let started = DispatchTime.now()
+            let ping = Task.detached {
                 Result {
                     try pinger.ping(sequence: sequence, payloadSize: options.payloadSize, timeout: options.timeout)
                 }
-            }.value
+            }
+            // A detached task doesn't inherit cancellation, so pass Stop on to it.
+            let result = await withTaskCancellationHandler {
+                await ping.value
+            } onCancel: {
+                ping.cancel()
+            }
+
+            // Stopped while waiting for this reply: don't count it as lost.
+            if case .failure(let error) = result, error is CancellationError { break }
 
             switch result {
             case .success(let reply):
@@ -153,7 +163,10 @@ final class PingViewModel: ObservableObject {
 
             seq += 1
             if limit.map({ seq < $0 }) ?? true {
-                let wait = max(0, options.interval - (result.rtt ?? options.timeout))
+                // Errors such as "no route" or "TTL exceeded" return almost at once,
+                // so pace by the time this ping really took, not by the timeout.
+                let elapsed = Double(DispatchTime.now().uptimeNanoseconds - started.uptimeNanoseconds) / 1_000_000_000
+                let wait = max(0, options.interval - elapsed)
                 try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000))
             }
         }
@@ -191,12 +204,6 @@ final class PingViewModel: ObservableObject {
 
 private func describe(_ error: Error, in language: Language) -> String {
     (error as? PingError)?.message(in: language) ?? error.localizedDescription
-}
-
-private extension Result where Success == PingReply {
-    var rtt: TimeInterval? {
-        (try? get()).map { $0.rtt / 1000 }
-    }
 }
 
 private extension Comparable {
